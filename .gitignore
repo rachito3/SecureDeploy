@@ -1,0 +1,27 @@
+# Sensitive files
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Node modules
+node_modules/
+npm-debug.log*
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

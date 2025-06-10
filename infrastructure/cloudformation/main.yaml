@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SecureDeploy DevSecOps Lab Infrastructure'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'SecureDeploy'
+    Description: 'Name of the project for resource tagging'
+  
+  KeyPairName:
+    Type: String
+    Description: 'Name of the EC2 Key Pair for SSH access'
+    Default: 'securedeploy-keypair'
+
+Resources:
+  # Security Group - Controls network access
+  SecureDeploySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for SecureDeploy lab'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: 'SSH access'
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+          Description: 'Jenkins web interface'
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: 'Application port'
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: 0.0.0.0/0
+          Description: 'Kubernetes API server'
+        - IpProtocol: tcp
+          FromPort: 30000
+          ToPort: 32767
+          CidrIp: 0.0.0.0/0
+          Description: 'Kubernetes NodePort range'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-SecurityGroup'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for EC2 instance
+  SecureDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-EC2-Role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Instance Profile
+  SecureDeployInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-InstanceProfile'
+      Roles:
+        - !Ref SecureDeployRole
+
+  # Elastic IP
+  SecureDeployEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-EIP'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # EC2 Instance
+  SecureDeployInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2023 in us-east-1
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds:
+        - !Ref SecureDeploySecurityGroup
+      IamInstanceProfile: !Ref SecureDeployInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          
+          # Install Docker
+          yum install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker ec2-user
+          
+          # Install Git
+          yum install -y git
+          
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+          
+          # Install k3s (lightweight Kubernetes)
+          curl -sfL https://get.k3s.io | sh -
+          
+          # Install Jenkins
+          wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+          rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+          yum upgrade -y
+          yum install -y java-17-openjdk jenkins
+          systemctl start jenkins
+          systemctl enable jenkins
+          
+          # Set up directory structure
+          mkdir -p /home/ec2-user/securedeploy
+          chown ec2-user:ec2-user /home/ec2-user/securedeploy
+          
+          echo "Setup completed" > /var/log/user-data.log
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Instance'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Associate Elastic IP with Instance
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref SecureDeployInstance
+      EIP: !Ref SecureDeployEIP
+
+Outputs:
+  InstanceId:
+    Description: 'EC2 Instance ID'
+    Value: !Ref SecureDeployInstance
+    Export:
+      Name: !Sub '${ProjectName}-InstanceId'
+  
+  PublicIP:
+    Description: 'Public IP address of the instance'
+    Value: !Ref SecureDeployEIP
+    Export:
+      Name: !Sub '${ProjectName}-PublicIP'
+  
+  JenkinsURL:
+    Description: 'Jenkins web interface URL'
+    Value: !Sub 'http://${SecureDeployEIP}:8080'
+    Export:
+      Name: !Sub '${ProjectName}-JenkinsURL'
+  
+  SSHCommand:
+    Description: 'SSH command to connect to the instance'
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ec2-user@${SecureDeployEIP}'
+    Export:
+      Name: !Sub '${ProjectName}-SSHCommand'
